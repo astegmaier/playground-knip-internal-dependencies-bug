@@ -1,0 +1,10 @@
+{
+  "name": "knip-internal-deps-bug",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "knip": "^6.0.5"
+  }
+}

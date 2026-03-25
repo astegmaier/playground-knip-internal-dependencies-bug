@@ -1,0 +1,8 @@
+{
+  "workspaces": {
+    "packages/eslint-plugin-custom": {},
+    "packages/my-lib": {
+      "eslint": true
+    }
+  }
+}

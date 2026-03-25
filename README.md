@@ -1,0 +1,139 @@
+# Knip bug: workspace dependencies reported as unused in single-workspace mode
+
+## The issue
+
+In a monorepo, when a package's `eslint.config.mjs` imports a **sibling workspace package** (e.g. a shared ESLint plugin), knip incorrectly reports that dependency as unused — but only when knip is invoked from within the package directory (single-workspace mode).
+
+This is the typical invocation pattern for large monorepos that use task orchestrators like Lage or Turborepo, which `cd` into each package and run knip per-workspace.
+
+## Reproduction
+
+```
+packages/
+  eslint-plugin-custom/     # A shared ESLint plugin
+    src/index.js
+    package.json             # name: @repo/eslint-plugin-custom
+  my-lib/
+    src/index.js
+    eslint.config.mjs        # imports @repo/eslint-plugin-custom
+    package.json             # devDependencies: { "@repo/eslint-plugin-custom": "workspace:*" }
+    knip.json                # { "eslint": true }
+knip.json                   # root config with both workspaces
+```
+
+```sh
+pnpm install
+
+# From root — CORRECT: @repo/eslint-plugin-custom is NOT reported unused
+npx knip --include dependencies
+
+# From root with workspace filter — CORRECT: same result
+npx knip --include dependencies --workspace packages/my-lib
+
+# From package directory — BUG: @repo/eslint-plugin-custom IS reported unused
+cd packages/my-lib
+npx knip --include dependencies
+```
+
+## Why it should work
+
+Knip's ESLint plugin correctly finds `eslint.config.mjs`, adds it as an entry file, and the import walker follows the `import customPlugin from '@repo/eslint-plugin-custom'` statement. The file is parsed, the import is extracted, and the dependency appears in `file.imports.imports`.
+
+The key evidence that this _should_ work: running from the root with `--workspace packages/my-lib` produces the correct result. The only difference is whether the sibling workspace is in `availableWorkspacePkgNames`.
+
+## Root cause
+
+The bug is in `packages/knip/src/graph/build.ts`, in the `analyzeSourceFile` callback (~line 400).
+
+### How dependency tracking works
+
+When knip analyzes a source file, it resolves each import specifier via TypeScript's module resolver. For a workspace dependency like `@repo/eslint-plugin-custom`, the resolver follows the **symlink** in `node_modules` and resolves to the real path: `packages/eslint-plugin-custom/src/index.js`.
+
+Because this resolved path is **not inside `node_modules`**, TypeScript sets `isExternalLibraryImport = false`. This causes `_getImportsAndExports` to classify the import as **internal** (not external). The dependency never enters the `external` set at the source analysis level.
+
+To compensate, `build.ts` has a recovery loop (lines 400-410) that scans `file.imports.imports` for internal imports that are actually workspace packages:
+
+```typescript
+for (const _import of file.imports.imports) {
+  if (_import.filePath) {
+    const packageName = getPackageNameFromModuleSpecifier(_import.specifier);
+    if (packageName && isInternalWorkspace(packageName)) {
+      file.imports.external.add({ ..._import, specifier: packageName });
+      // ...
+    }
+  }
+}
+```
+
+### Where it breaks
+
+`isInternalWorkspace` is defined as:
+
+```typescript
+const isInternalWorkspace = (packageName) =>
+  chief.availableWorkspacePkgNames.has(packageName);
+```
+
+When knip runs from the **root** with all workspaces configured, `availableWorkspacePkgNames` contains both `@repo/my-lib` and `@repo/eslint-plugin-custom`. The check passes and the dependency is correctly promoted to `external`.
+
+When knip runs from **within `packages/my-lib`** (single-workspace mode), `availableWorkspacePkgNames` contains only `@repo/my-lib`. The sibling package `@repo/eslint-plugin-custom` is not recognized as an internal workspace. The `if` branch is skipped, and there is no `else` branch to catch this case.
+
+The import is:
+- Not in `external` (because `isExternalLibraryImport` was false)
+- Not in `unresolved` (because the module resolved successfully)
+- Skipped by the `isInternalWorkspace` recovery check
+
+It silently falls through. Nothing marks the dependency as referenced. Knip reports it as unused.
+
+### The full data flow
+
+```
+eslint.config.mjs
+  import @repo/eslint-plugin-custom
+    │
+    ├─ TypeScript resolves to: packages/eslint-plugin-custom/src/index.js
+    │  (not in node_modules → isExternalLibraryImport = false)
+    │
+    ├─ _getImportsAndExports:
+    │    internal: ✅ (added to internal map and imports set)
+    │    external: ❌ (not added — isExternalLibraryImport is false)
+    │
+    └─ build.ts recovery loop:
+         packageName = "@repo/eslint-plugin-custom"
+         isInternalWorkspace("@repo/eslint-plugin-custom") = false  ← BUG
+         │
+         └─ Falls through. Dependency never marked as referenced.
+```
+
+## Suggested fix
+
+Add an `else if` branch to the recovery loop in `build.ts` that catches the case where a package-name-like specifier resolves outside `node_modules` but is not a known workspace:
+
+```typescript
+for (const _import of file.imports.imports) {
+  if (_import.filePath) {
+    const packageName = getPackageNameFromModuleSpecifier(_import.specifier);
+    if (packageName && isInternalWorkspace(packageName)) {
+      file.imports.external.add({ ..._import, specifier: packageName });
+      if (!isGitIgnored(_import.filePath)) {
+        pp.addProgramPath(_import.filePath);
+      }
+    } else if (packageName && isStartsLikePackageName(packageName) && !isInNodeModules(_import.filePath)) {
+      // In single-workspace mode, sibling workspace packages resolve via
+      // symlinks to paths outside node_modules. They won't appear in
+      // availableWorkspacePkgNames, so the check above misses them.
+      // Treat them as external so the dependency is marked as referenced.
+      file.imports.external.add({ ..._import, specifier: packageName });
+    }
+  }
+}
+```
+
+The conditions are:
+1. `packageName` exists — the specifier looks like a package name (scoped or unscoped)
+2. `isStartsLikePackageName(packageName)` — extra guard that it's a valid npm-style name
+3. `!isInNodeModules(_import.filePath)` — the resolved file is outside `node_modules`, meaning it reached the real path via a symlink (the hallmark of a workspace dependency)
+
+Both `isStartsLikePackageName` and `isInNodeModules` are already imported in `build.ts`.
+
+This fix does not add the file as a program path (unlike the `isInternalWorkspace` branch), since in single-workspace mode we don't want to crawl into the sibling workspace's source tree. We only need to mark the dependency as referenced.
