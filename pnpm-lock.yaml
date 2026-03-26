@@ -12,13 +12,13 @@ importers:
         specifier: ^6.0.5
         version: 6.0.5
 
-  packages/app:
+  package-a:
     dependencies:
-      '@repo/utils':
+      '@repo/package-b':
         specifier: workspace:*
-        version: link:../utils
+        version: link:../package-b
 
-  packages/utils: {}
+  package-b: {}
 
 packages:
 

@@ -11,14 +11,14 @@ This is the typical invocation pattern for large monorepos that use task orchest
 ## Reproduction
 
 ```
-packages/
-  utils/                     # A shared utility package
-    src/index.js             # exports add()
-    package.json             # name: @repo/utils
-  app/
-    src/index.js             # import { add } from '@repo/utils'
-    package.json             # dependencies: { "@repo/utils": "workspace:*" }
-knip.json                   # root config with both workspaces
+package-a/
+  index.js             # import { add } from '@repo/package-b'
+  package.json         # dependencies: { "@repo/package-b": "workspace:*" }
+package-b/
+  index.js             # export function add(a, b) { return a + b; }
+  package.json         # name: @repo/package-b
+pnpm-workspace.yaml    # packages: [package-a, package-b]
+package.json           # root, devDependencies: { knip }
 ```
 
 ```sh
@@ -28,20 +28,20 @@ pnpm install
 npx knip --include dependencies
 
 # From root with workspace filter — CORRECT: no issues reported
-npx knip --include dependencies --workspace packages/app
+npx knip --include dependencies --workspace package-a
 
-# From package directory — BUG: @repo/utils IS reported unused
-cd packages/app
+# From package directory — BUG: @repo/package-b IS reported unused
+cd package-a
 npx knip --include dependencies
 # Unused dependencies (1)
-# @repo/utils  package.json:6:6
+# @repo/package-b  package.json:6:6
 ```
 
 ## Why it should work
 
-Knip's import walker correctly finds `src/index.js`, parses the `import { add } from '@repo/utils'` statement, resolves the module, and records the import in `file.imports.imports`. The dependency is clearly used.
+Knip's import walker correctly finds `index.js`, parses the `import { add } from '@repo/package-b'` statement, resolves the module, and records the import in `file.imports.imports`. The dependency is clearly used.
 
-The key evidence that this _should_ work: running from the root with `--workspace packages/app` produces the correct result. The only difference is whether the sibling workspace is in `availableWorkspacePkgNames`.
+The key evidence that this _should_ work: running from the root with `--workspace package-a` produces the correct result. The only difference is whether the sibling workspace is in `availableWorkspacePkgNames`.
 
 ## Root cause
 
@@ -49,7 +49,7 @@ The bug is in `packages/knip/src/graph/build.ts`, in the `analyzeSourceFile` cal
 
 ### How dependency tracking works
 
-When knip analyzes a source file, it resolves each import specifier via TypeScript's module resolver. For a workspace dependency like `@repo/utils`, the resolver follows the **symlink** in `node_modules` and resolves to the real path: `packages/utils/src/index.js`.
+When knip analyzes a source file, it resolves each import specifier via TypeScript's module resolver. For a workspace dependency like `@repo/package-b`, the resolver follows the **symlink** in `node_modules` and resolves to the real path: `package-b/index.js`.
 
 Because this resolved path is **not inside `node_modules`**, TypeScript sets `isExternalLibraryImport = false`. This causes `_getImportsAndExports` to classify the import as **internal** (not external). The dependency never enters the `external` set at the source analysis level.
 
@@ -76,9 +76,9 @@ const isInternalWorkspace = (packageName) =>
   chief.availableWorkspacePkgNames.has(packageName);
 ```
 
-When knip runs from the **root** with all workspaces configured, `availableWorkspacePkgNames` contains both `@repo/app` and `@repo/utils`. The check passes and the dependency is correctly promoted to `external`.
+When knip runs from the **root** with all workspaces configured, `availableWorkspacePkgNames` contains both `@repo/package-a` and `@repo/package-b`. The check passes and the dependency is correctly promoted to `external`.
 
-When knip runs from **within `packages/app`** (single-workspace mode), `availableWorkspacePkgNames` contains only `@repo/app`. The sibling package `@repo/utils` is not recognized as an internal workspace. The `if` branch is skipped, and there is no `else` branch to catch this case.
+When knip runs from **within `package-a`** (single-workspace mode), `availableWorkspacePkgNames` contains only `@repo/package-a`. The sibling package `@repo/package-b` is not recognized as an internal workspace. The `if` branch is skipped, and there is no `else` branch to catch this case.
 
 The import is:
 - Not in `external` (because `isExternalLibraryImport` was false)
@@ -90,10 +90,10 @@ It silently falls through. Nothing marks the dependency as referenced. Knip repo
 ### The full data flow
 
 ```
-src/index.js
-  import { add } from '@repo/utils'
+index.js
+  import { add } from '@repo/package-b'
     │
-    ├─ TypeScript resolves to: packages/utils/src/index.js
+    ├─ TypeScript resolves to: package-b/index.js
     │  (not in node_modules → isExternalLibraryImport = false)
     │
     ├─ _getImportsAndExports:
@@ -101,8 +101,8 @@ src/index.js
     │    external: NO  (not added — isExternalLibraryImport is false)
     │
     └─ build.ts recovery loop:
-         packageName = "@repo/utils"
-         isInternalWorkspace("@repo/utils") = false  ← BUG
+         packageName = "@repo/package-b"
+         isInternalWorkspace("@repo/package-b") = false  ← BUG
          │
          └─ Falls through. Dependency never marked as referenced.
 ```
