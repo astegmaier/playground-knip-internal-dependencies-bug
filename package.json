@@ -1,6 +1,7 @@
 {
   "name": "knip-internal-deps-bug",
   "private": true,
+  "packageManager": "pnpm@10.32.1",
   "devDependencies": {
     "knip": "^6.0.5"
   }
