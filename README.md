@@ -2,7 +2,9 @@
 
 ## The issue
 
-In a monorepo, when a package's `eslint.config.mjs` imports a **sibling workspace package** (e.g. a shared ESLint plugin), knip incorrectly reports that dependency as unused — but only when knip is invoked from within the package directory (single-workspace mode).
+In a monorepo, when a package imports a **sibling workspace package**, knip incorrectly reports that dependency as unused — but only when knip is invoked from within the package directory (single-workspace mode).
+
+Running from the monorepo root, or using `--workspace` from the root, correctly recognizes the dependency as used.
 
 This is the typical invocation pattern for large monorepos that use task orchestrators like Lage or Turborepo, which `cd` into each package and run knip per-workspace.
 
@@ -10,36 +12,36 @@ This is the typical invocation pattern for large monorepos that use task orchest
 
 ```
 packages/
-  eslint-plugin-custom/     # A shared ESLint plugin
-    src/index.js
-    package.json             # name: @repo/eslint-plugin-custom
-  my-lib/
-    src/index.js
-    eslint.config.mjs        # imports @repo/eslint-plugin-custom
-    package.json             # devDependencies: { "@repo/eslint-plugin-custom": "workspace:*" }
-    knip.json                # { "eslint": true }
+  utils/                     # A shared utility package
+    src/index.js             # exports add()
+    package.json             # name: @repo/utils
+  app/
+    src/index.js             # import { add } from '@repo/utils'
+    package.json             # dependencies: { "@repo/utils": "workspace:*" }
 knip.json                   # root config with both workspaces
 ```
 
 ```sh
 pnpm install
 
-# From root — CORRECT: @repo/eslint-plugin-custom is NOT reported unused
+# From root — CORRECT: no issues reported
 npx knip --include dependencies
 
-# From root with workspace filter — CORRECT: same result
-npx knip --include dependencies --workspace packages/my-lib
+# From root with workspace filter — CORRECT: no issues reported
+npx knip --include dependencies --workspace packages/app
 
-# From package directory — BUG: @repo/eslint-plugin-custom IS reported unused
-cd packages/my-lib
+# From package directory — BUG: @repo/utils IS reported unused
+cd packages/app
 npx knip --include dependencies
+# Unused dependencies (1)
+# @repo/utils  package.json:6:6
 ```
 
 ## Why it should work
 
-Knip's ESLint plugin correctly finds `eslint.config.mjs`, adds it as an entry file, and the import walker follows the `import customPlugin from '@repo/eslint-plugin-custom'` statement. The file is parsed, the import is extracted, and the dependency appears in `file.imports.imports`.
+Knip's import walker correctly finds `src/index.js`, parses the `import { add } from '@repo/utils'` statement, resolves the module, and records the import in `file.imports.imports`. The dependency is clearly used.
 
-The key evidence that this _should_ work: running from the root with `--workspace packages/my-lib` produces the correct result. The only difference is whether the sibling workspace is in `availableWorkspacePkgNames`.
+The key evidence that this _should_ work: running from the root with `--workspace packages/app` produces the correct result. The only difference is whether the sibling workspace is in `availableWorkspacePkgNames`.
 
 ## Root cause
 
@@ -47,7 +49,7 @@ The bug is in `packages/knip/src/graph/build.ts`, in the `analyzeSourceFile` cal
 
 ### How dependency tracking works
 
-When knip analyzes a source file, it resolves each import specifier via TypeScript's module resolver. For a workspace dependency like `@repo/eslint-plugin-custom`, the resolver follows the **symlink** in `node_modules` and resolves to the real path: `packages/eslint-plugin-custom/src/index.js`.
+When knip analyzes a source file, it resolves each import specifier via TypeScript's module resolver. For a workspace dependency like `@repo/utils`, the resolver follows the **symlink** in `node_modules` and resolves to the real path: `packages/utils/src/index.js`.
 
 Because this resolved path is **not inside `node_modules`**, TypeScript sets `isExternalLibraryImport = false`. This causes `_getImportsAndExports` to classify the import as **internal** (not external). The dependency never enters the `external` set at the source analysis level.
 
@@ -74,9 +76,9 @@ const isInternalWorkspace = (packageName) =>
   chief.availableWorkspacePkgNames.has(packageName);
 ```
 
-When knip runs from the **root** with all workspaces configured, `availableWorkspacePkgNames` contains both `@repo/my-lib` and `@repo/eslint-plugin-custom`. The check passes and the dependency is correctly promoted to `external`.
+When knip runs from the **root** with all workspaces configured, `availableWorkspacePkgNames` contains both `@repo/app` and `@repo/utils`. The check passes and the dependency is correctly promoted to `external`.
 
-When knip runs from **within `packages/my-lib`** (single-workspace mode), `availableWorkspacePkgNames` contains only `@repo/my-lib`. The sibling package `@repo/eslint-plugin-custom` is not recognized as an internal workspace. The `if` branch is skipped, and there is no `else` branch to catch this case.
+When knip runs from **within `packages/app`** (single-workspace mode), `availableWorkspacePkgNames` contains only `@repo/app`. The sibling package `@repo/utils` is not recognized as an internal workspace. The `if` branch is skipped, and there is no `else` branch to catch this case.
 
 The import is:
 - Not in `external` (because `isExternalLibraryImport` was false)
@@ -88,19 +90,19 @@ It silently falls through. Nothing marks the dependency as referenced. Knip repo
 ### The full data flow
 
 ```
-eslint.config.mjs
-  import @repo/eslint-plugin-custom
+src/index.js
+  import { add } from '@repo/utils'
     │
-    ├─ TypeScript resolves to: packages/eslint-plugin-custom/src/index.js
+    ├─ TypeScript resolves to: packages/utils/src/index.js
     │  (not in node_modules → isExternalLibraryImport = false)
     │
     ├─ _getImportsAndExports:
-    │    internal: ✅ (added to internal map and imports set)
-    │    external: ❌ (not added — isExternalLibraryImport is false)
+    │    internal: YES (added to internal map and imports set)
+    │    external: NO  (not added — isExternalLibraryImport is false)
     │
     └─ build.ts recovery loop:
-         packageName = "@repo/eslint-plugin-custom"
-         isInternalWorkspace("@repo/eslint-plugin-custom") = false  ← BUG
+         packageName = "@repo/utils"
+         isInternalWorkspace("@repo/utils") = false  ← BUG
          │
          └─ Falls through. Dependency never marked as referenced.
 ```
