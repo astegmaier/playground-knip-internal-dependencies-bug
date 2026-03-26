@@ -6,8 +6,6 @@ In a monorepo, when a package imports a **sibling workspace package**, knip inco
 
 Running from the monorepo root, or using `--workspace` from the root, correctly recognizes the dependency as used.
 
-This is the typical invocation pattern for large monorepos that use task orchestrators like Lage or Turborepo, which `cd` into each package and run knip per-workspace.
-
 ## Reproduction
 
 ```
@@ -25,29 +23,33 @@ package.json           # root, devDependencies: { knip }
 pnpm install
 
 # From root — CORRECT: no issues reported
-npx knip --include dependencies
+pnpm knip --include dependencies
 
 # From root with workspace filter — CORRECT: no issues reported
-npx knip --include dependencies --workspace package-a
+pnpm knip --include dependencies --workspace package-a
 
 # From package directory — BUG: @repo/package-b IS reported unused
 cd package-a
-npx knip --include dependencies
+pnpm knip --include dependencies
 # Unused dependencies (1)
 # @repo/package-b  package.json:6:6
 ```
 
-## Why it should work
+## Why it matters to me (and maybe others too)
 
-Knip's import walker correctly finds `index.js`, parses the `import { add } from '@repo/package-b'` statement, resolves the module, and records the import in `file.imports.imports`. The dependency is clearly used.
+This behavior can be important in an extremely large monorepo where scanning all the packages on each change is extremely expensive. Task orchestrators like `lage` and `turborepo` can be smart about which packages need to have `knip` run on them in a CI job based on whether there were changes. But this can only work if single-workspace mode works roughly the same way. (This kind of setup sacrifices some features, like `--include-entry-exports`, but the tradeoff can be worth it for the performance gain in extremely large repos.)
 
-The key evidence that this _should_ work: running from the root with `--workspace package-a` produces the correct result. The only difference is whether the sibling workspace is in `availableWorkspacePkgNames`.
+---
 
-## Root cause
+## AI-generated root-cause analysis and suggested fix
+
+*Note: While I've carefully reviewed and refined the reproduction of the issue above, I haven't yet done the same for the root cause analysis below. I'm still including it in case it's helpful.*
+
+### Root cause
 
 The bug is in `packages/knip/src/graph/build.ts`, in the `analyzeSourceFile` callback (~line 400).
 
-### How dependency tracking works
+#### How dependency tracking works
 
 When knip analyzes a source file, it resolves each import specifier via TypeScript's module resolver. For a workspace dependency like `@repo/package-b`, the resolver follows the **symlink** in `node_modules` and resolves to the real path: `package-b/index.js`.
 
@@ -67,7 +69,7 @@ for (const _import of file.imports.imports) {
 }
 ```
 
-### Where it breaks
+#### Where it breaks
 
 `isInternalWorkspace` is defined as:
 
@@ -87,7 +89,7 @@ The import is:
 
 It silently falls through. Nothing marks the dependency as referenced. Knip reports it as unused.
 
-### The full data flow
+#### The full data flow
 
 ```
 index.js
@@ -107,7 +109,7 @@ index.js
          └─ Falls through. Dependency never marked as referenced.
 ```
 
-## Suggested fix
+### Suggested fix
 
 Add an `else if` branch to the recovery loop in `build.ts` that catches the case where a package-name-like specifier resolves outside `node_modules` but is not a known workspace:
 
