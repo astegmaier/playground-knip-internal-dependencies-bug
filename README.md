@@ -8,17 +8,6 @@ Running from the monorepo root, or using `--workspace` from the root, correctly 
 
 ## Reproduction
 
-```
-package-a/
-  index.js             # import { add } from '@repo/package-b'
-  package.json         # dependencies: { "@repo/package-b": "workspace:*" }
-package-b/
-  index.js             # export function add(a, b) { return a + b; }
-  package.json         # name: @repo/package-b
-pnpm-workspace.yaml    # packages: [package-a, package-b]
-package.json           # root, devDependencies: { knip }
-```
-
 ```sh
 pnpm install
 
