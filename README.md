@@ -1,8 +1,8 @@
-# Knip bug: workspace dependencies reported as unused in single-workspace mode
+# Knip bug: Dependencies incorrectly reported as unused when run from package directory (regression in 5.7.0)
 
 ## The issue
 
-In a monorepo, when a package imports a **sibling workspace package**, knip incorrectly reports that dependency as unused — but only when knip is invoked from within the package directory (single-workspace mode).
+In a monorepo, when a package imports a **sibling workspace package**, knip incorrectly reports that dependency as unused — but only when knip is invoked from [within the package directory](https://knip.dev/features/monorepos-and-workspaces#filter-workspaces).
 
 Running from the monorepo root, or using `--workspace` from the root, correctly recognizes the dependency as used.
 
