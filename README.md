@@ -28,6 +28,10 @@ pnpm knip --include dependencies
 
 This behavior can be important in an extremely large monorepo where scanning all the packages on each change is extremely expensive. Task orchestrators like `lage` and `turborepo` can be smart about which packages need to have `knip` run on them in a CI job based on whether there were changes. But this can only work if single-workspace mode works roughly the same way. (This kind of setup sacrifices some features, like `--include-entry-exports`, but the tradeoff can be worth it for the performance gain in extremely large repos.)
 
+## Regression testing
+
+This issue appears to have first appeared in knip 5.7.0. It does NOT reproduce in knip 5.6.1 and earlier. It DOES reproduce in the latest version (6.0.5 as of this writing).
+
 ---
 
 ## AI-generated root-cause analysis and suggested fix
